@@ -1,74 +1,90 @@
-# nasa_client.py (Version with two instruments: GST and CME)
+# nasa_client.py (NASA DONKI API Client)
 
 import requests
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
-NASA_API_BASE_URL = "https://api.nasa.gov/DONKI"
+from config import NASA_API_BASE_URL
 
-def fetch_live_data(api_key: str) -> Dict[str, Any]:
+def fetch_nasa_data(api_key: str) -> Dict[str, Any]:
     """
-    Fetches data from two DONKI endpoints: GST and CME.
+    Fetches data from NASA's DONKI endpoints (CME, GST, FLR).
     """
     if not api_key:
         logging.warning("NASA API key is missing.")
         return {}
 
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=15)
-    date_params = {
-        "startDate": start_date.strftime('%Y-%m-%d'),
-        "endDate": end_date.strftime('%Y-%m-%d'),
-        "api_key": api_key
-    }
+    start_date_30_days = end_date - timedelta(days=30)
+    start_date_2_days = end_date - timedelta(days=2)
 
     compiled_data: Dict[str, Any] = {}
-    logging.info(f"Querying NASA DONKI from {date_params['startDate']} to {date_params['endDate']}...")
-
-    # --- Fetch 1: Geomagnetic Storm (GST) for Kp Index ---
+    
+    # --- Fetch 1: CME Speed Series (30-day range) ---
     try:
-        logging.info("Fetching GST data for atmospheric noise...")
-        response_gst = requests.get(f"{NASA_API_BASE_URL}/GST", params=date_params)
-        response_gst.raise_for_status()
-        gst_events = response_gst.json()
-        
+        params = {"startDate": start_date_30_days.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "api_key": api_key}
+        response = requests.get(f"{NASA_API_BASE_URL}/CME", params=params, timeout=15)
+        response.raise_for_status()
+        events = response.json()
+        speed_series = [
+            analysis.get('speed', 0)
+            for event in events
+            if event.get('cmeAnalyses') for analysis in event['cmeAnalyses']
+            if analysis.get('speed', 0) > 0
+        ]
+        compiled_data['cme_speed_series'] = speed_series[-16:]
+        logging.info(f"CME fetch complete. Found {len(speed_series)} events.")
+    except Exception as e:
+        logging.error(f"Failed during CME fetch: {e}")
+
+    # --- Fetch 2: GST Kp Index (30-day range) ---
+    try:
+        params = {"startDate": start_date_30_days.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "api_key": api_key}
+        response = requests.get(f"{NASA_API_BASE_URL}/GST", params=params, timeout=15)
+        response.raise_for_status()
+        events = response.json()
         max_kp = 0
-        if gst_events:
-            for event in gst_events:
+        if events:
+            for event in events:
                 if event.get('allKpIndex'):
                     for kp_reading in event['allKpIndex']:
                         kp_value = kp_reading.get('kpIndex', 0)
-                        if kp_value > max_kp:
-                            max_kp = kp_value
+                        if kp_value > max_kp: max_kp = kp_value
         compiled_data['max_kp_index'] = int(max_kp)
-        logging.info(f"GST Check Complete. Max KpIndex observed: {max_kp}")
-
+        logging.info(f"GST fetch complete. Max KpIndex: {max_kp}")
     except Exception as e:
         logging.error(f"Failed during GST fetch: {e}")
-        compiled_data['max_kp_index'] = 0 # Default to 0 on error
 
-    # --- Fetch 2: Coronal Mass Ejection (CME) for Speed/Frequency ---
+    # --- Fetch 3: Solar Flares (2-day range) ---
     try:
-        logging.info("Fetching CME data for main frequency...")
-        response_cme = requests.get(f"{NASA_API_BASE_URL}/CME", params=date_params)
-        response_cme.raise_for_status()
-        cme_events = response_cme.json()
-
-        fastest_speed = 0
-        if cme_events:
-            for event in cme_events:
-                # CMEs can have multiple analyses, we check the first one
-                if event.get('cmeAnalyses'):
-                    analysis = event['cmeAnalyses'][0]
-                    speed = analysis.get('speed', 0)
-                    if speed > fastest_speed:
-                        fastest_speed = speed
-        compiled_data['fastest_cme_speed'] = int(fastest_speed)
-        logging.info(f"CME Check Complete. Fastest CME speed observed: {fastest_speed} km/s")
-
+        params = {"startDate": start_date_2_days.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "api_key": api_key}
+        response = requests.get(f"{NASA_API_BASE_URL}/FLR", params=params, timeout=15)
+        response.raise_for_status()
+        events = response.json()
+        latest_flare = events[-1] if events else None
+        compiled_data['latest_flare'] = latest_flare
+        if latest_flare:
+            logging.info(f"Solar Flare fetch complete. Found a recent flare: {latest_flare.get('classType')}")
+        else:
+            logging.info("Solar Flare fetch complete. No recent flares.")
     except Exception as e:
-        logging.error(f"Failed during CME fetch: {e}")
-        compiled_data['fastest_cme_speed'] = 0 # Default to 0 on error
+        logging.error(f"Failed during Solar Flare fetch: {e}")
 
     return compiled_data
+
+# --- Test Block for Direct Execution ---
+if __name__ == '__main__':
+    import os
+    from dotenv import load_dotenv
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    load_dotenv()
+    test_api_key = os.getenv("NASA_API_KEY")
+    print("--- Running nasa_client.py in Standalone Test Mode ---")
+    if not test_api_key:
+        logging.critical("CRITICAL: NASA_API_KEY not found in .env file.")
+    else:
+        fetched_data = fetch_nasa_data(test_api_key)
+        print("\n--- Test Result ---")
+        print(fetched_data)
+    print("\n--- Test Finished ---")
